@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Generated files
+*.docx
+*.png
+temp_*.png
+component_change_reasons.json
+
+# Excel and PDF files (keep in repo for testing)
+# Uncomment if you don't want to track these
+# *.xlsx
+# *.PDF
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
