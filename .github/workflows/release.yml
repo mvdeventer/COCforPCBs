@@ -1,0 +1,183 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v1.0.0)'
+        required: false
+        type: string
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        cache: 'pip'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+
+    - name: Get version from tag
+      id: get_version
+      shell: pwsh
+      run: |
+        if ("${{ github.event.inputs.version }}" -ne "") {
+          $version = "${{ github.event.inputs.version }}"
+        } else {
+          $version = "${{ github.ref_name }}"
+        }
+        $clean_version = $version -replace '^v', ''
+        echo "VERSION=$version" >> $env:GITHUB_OUTPUT
+        echo "CLEAN_VERSION=$clean_version" >> $env:GITHUB_OUTPUT
+        echo "Building version: $version"
+
+    - name: Update version info files
+      shell: pwsh
+      run: |
+        $version = "${{ steps.get_version.outputs.CLEAN_VERSION }}"
+        $versionParts = $version -split '\.'
+        $major = $versionParts[0]
+        $minor = if ($versionParts.Length -gt 1) { $versionParts[1] } else { "0" }
+        $patch = if ($versionParts.Length -gt 2) { $versionParts[2] } else { "0" }
+
+        # Update version_info.txt
+        $content = Get-Content version_info.txt -Raw
+        $content = $content -replace "filevers=\(.*?\)", "filevers=($major, $minor, $patch, 0)"
+        $content = $content -replace "prodvers=\(.*?\)", "prodvers=($major, $minor, $patch, 0)"
+        $content = $content -replace "u'FileVersion', u'.*?'", "u'FileVersion', u'$version'"
+        $content = $content -replace "u'ProductVersion', u'.*?'", "u'ProductVersion', u'$version'"
+        Set-Content -Path version_info.txt -Value $content
+
+        # Update installer.iss
+        if (Test-Path installer.iss) {
+          $issContent = Get-Content installer.iss -Raw
+          $issContent = $issContent -replace '#define AppVersion ".*?"', "#define AppVersion `"$version`""
+          Set-Content -Path installer.iss -Value $issContent
+        }
+
+    - name: Build executable with PyInstaller
+      shell: pwsh
+      run: |
+        echo "Building executable..."
+        pyinstaller coc_report.spec --clean --noconfirm
+
+        if (Test-Path "dist\COC_Report_Generator.exe") {
+          echo "✅ EXE built successfully"
+          $size = (Get-Item "dist\COC_Report_Generator.exe").Length / 1MB
+          echo "EXE size: $([math]::Round($size, 2)) MB"
+        } else {
+          echo "❌ EXE build failed"
+          exit 1
+        }
+
+    - name: Install Inno Setup
+      shell: pwsh
+      run: |
+        choco install innosetup -y
+        refreshenv
+
+    - name: Build installer
+      shell: pwsh
+      run: |
+        & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+
+        $installerPath = "dist\installer\COC_Report_Generator_Setup_${{ steps.get_version.outputs.CLEAN_VERSION }}.exe"
+        if (Test-Path $installerPath) {
+          echo "✅ Installer built successfully"
+          $size = (Get-Item $installerPath).Length / 1MB
+          echo "Installer size: $([math]::Round($size, 2)) MB"
+        } else {
+          echo "❌ Installer build failed"
+          exit 1
+        }
+
+    - name: Create checksums
+      shell: pwsh
+      run: |
+        $exePath = "dist\COC_Report_Generator.exe"
+        $installerPath = "dist\installer\COC_Report_Generator_Setup_${{ steps.get_version.outputs.CLEAN_VERSION }}.exe"
+
+        $exeHash = (Get-FileHash -Path $exePath -Algorithm SHA256).Hash
+        $installerHash = (Get-FileHash -Path $installerPath -Algorithm SHA256).Hash
+
+        @"
+COC_Report_Generator.exe
+SHA256: $exeHash
+
+COC_Report_Generator_Setup_${{ steps.get_version.outputs.CLEAN_VERSION }}.exe
+SHA256: $installerHash
+"@ | Out-File -FilePath "dist\checksums.txt"
+
+    - name: Generate release notes
+      id: release_notes
+      shell: pwsh
+      run: |
+        $version = "${{ steps.get_version.outputs.VERSION }}"
+
+        # Get previous tag
+        $tags = git tag --sort=-v:refname
+        $tagArray = $tags -split "`n"
+        $currentIndex = [array]::IndexOf($tagArray, $version)
+        $previousTag = if ($currentIndex -ge 0 -and $currentIndex -lt ($tagArray.Length - 1)) {
+          $tagArray[$currentIndex + 1]
+        } else {
+          $null
+        }
+
+        # Generate changelog
+        $notes = "## What's Changed`n`n"
+
+        if ($previousTag) {
+          $commits = git log "$previousTag..$version" --oneline --no-merges
+          if ($commits) {
+            $notes += "$commits`n"
+          } else {
+            $notes += "- Updates and improvements`n"
+          }
+        } else {
+          $notes += "- Initial release`n"
+        }
+
+        $notes += "`n## Installation`n`n"
+        $notes += "### Option 1: Windows Installer (Recommended)`n"
+        $notes += "Download and run ``COC_Report_Generator_Setup_${{ steps.get_version.outputs.CLEAN_VERSION }}.exe```n`n"
+        $notes += "### Option 2: Standalone Executable`n"
+        $notes += "Download ``COC_Report_Generator.exe`` and run directly`n`n"
+        $notes += "## Checksums`n`n"
+        $notes += "See ``checksums.txt`` for SHA256 verification`n"
+
+        $notes | Out-File -FilePath release_notes.txt
+        echo "RELEASE_NOTES<<EOF" >> $env:GITHUB_OUTPUT
+        echo "$notes" >> $env:GITHUB_OUTPUT
+        echo "EOF" >> $env:GITHUB_OUTPUT
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ steps.get_version.outputs.VERSION }}
+        name: Release ${{ steps.get_version.outputs.VERSION }}
+        body: ${{ steps.release_notes.outputs.RELEASE_NOTES }}
+        draft: false
+        prerelease: false
+        files: |
+          dist/COC_Report_Generator.exe
+          dist/installer/COC_Report_Generator_Setup_${{ steps.get_version.outputs.CLEAN_VERSION }}.exe
+          dist/checksums.txt
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
