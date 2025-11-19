@@ -22,11 +22,10 @@ a = Analysis(
     ['generate_coc_report.py'],
     pathex=[],
     binaries=[],
-    datas=[
-        ('company_logo.png', '.'),
-        ('README.md', '.'),
-        ('CHANGELOG.md', '.'),
-    ],
+    datas=[item for item in [
+        ('README.md', '.') if Path('README.md').exists() else None,
+        ('CHANGELOG.md', '.') if Path('CHANGELOG.md').exists() else None,
+    ] if item is not None],
     hiddenimports=[
         'openpyxl',
         'openpyxl.cell',
