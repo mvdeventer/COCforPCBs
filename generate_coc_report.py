@@ -6,7 +6,9 @@ Configurable for any product and version comparison
 
 import io
 import json
+import logging
 import re
+import sys
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +26,36 @@ from docx.shared import Inches, Pt, RGBColor
 from PIL import Image
 
 # ============================================================================
+# DEBUG MODE CONFIGURATION
+# ============================================================================
+DEBUG_MODE = "--debug" in sys.argv or "-d" in sys.argv
+
+# Configure logging
+if DEBUG_MODE:
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(asctime)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
+        handlers=[
+            logging.FileHandler("coc_debug.log"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+    print("\n" + "=" * 60)
+    print("🐛 DEBUG MODE ENABLED")
+    print("=" * 60)
+    print("Log file: coc_debug.log")
+    print(f"Command line args: {sys.argv}")
+    print("=" * 60 + "\n")
+else:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+logger = logging.getLogger(__name__)
+
+# ============================================================================
 # CONFIGURATION - Auto-detected from files in workspace
 # ============================================================================
 CONFIG = {
@@ -39,47 +71,374 @@ CONFIG = {
 }
 
 
+def extract_bom_metadata(bom_file_path):
+    """
+    Extract version, variant, and product info from BOM file contents.
+
+    logger.debug(f"extract_bom_metadata: Processing {bom_file_path}")
+
+    This function is CRITICAL and runs BEFORE any BOM analysis.
+    It searches the first 15 rows of the Excel file for metadata fields:
+    - Version: Product version number (e.g., "9", "10")
+    - Variant: Product variant description (e.g., "MLM24 PSU2", "NO SWITCH")
+    - Variant Letter: Single letter variant identifier (e.g., "A", "B")
+    - Product Name: Full product name
+    - Assembly No: Assembly number with embedded product code
+    - Build: Build identifier
+
+    The function searches flexibly across all columns to handle different
+    BOM file layouts and column positions.
+
+    Args:
+        bom_file_path: Path to the Excel BOM file
+
+    Returns:
+        dict: Metadata dictionary with extracted values (None if not found)
+    """
+    import openpyxl
+
+    metadata = {
+        "version": None,
+        "variant": None,
+        "variant_letter": None,
+        "product_name": None,
+        "assembly_no": None,
+        "build": None,
+    }
+
+    try:
+        wb = openpyxl.load_workbook(bom_file_path)
+        ws = wb.active
+
+        # Read first 15 rows to find metadata
+        for row in ws.iter_rows(max_row=15, values_only=True):
+            if row:
+                # Search across all columns for metadata fields (flexible column detection)
+                for i in range(len(row) - 1):
+                    key = str(row[i]).strip() if row[i] else ""
+                    value = (
+                        str(row[i + 1]).strip()
+                        if i + 1 < len(row) and row[i + 1]
+                        else ""
+                    )
+
+                    if not key or not value:
+                        continue
+
+                    if "Prod Name" in key:
+                        metadata["product_name"] = value
+                    elif "Assembly No" in key:
+                        metadata["assembly_no"] = value
+                        # Extract product from assembly number (e.g., BT3411A-8[1])
+                        match = re.search(r"([A-Z0-9]+)-", value)
+                        if match and not metadata["product_name"]:
+                            metadata["product_name"] = match.group(1)
+                    elif key == "Variant:":
+                        if not metadata["variant"]:
+                            metadata["variant"] = value
+                        elif len(value) == 1:  # Single letter variant
+                            metadata["variant_letter"] = value
+                    elif key == "Build:":
+                        metadata["build"] = value
+                    elif key == "Version:":
+                        metadata["version"] = value
+
+        wb.close()
+    except Exception as e:
+        print(f"Warning: Could not extract metadata from {bom_file_path.name}: {e}")
+
+    return metadata
+
+
+def load_file_config(workspace):
+    """Load saved file configuration"""
+    config_file = workspace / "input_files_config.json"
+    if config_file.exists():
+        try:
+            with open(config_file, "r") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load file config: {e}")
+    return None
+
+
+def save_file_config(workspace, config):
+    """Save file configuration"""
+    config_file = workspace / "input_files_config.json"
+    config["last_updated"] = datetime.now().isoformat()
+    try:
+        with open(config_file, "w") as f:
+            json.dump(config, f, indent=2)
+        logger.debug(f"Saved file config to {config_file}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to save file config: {e}")
+        return False
+
+
+def show_file_selector_dialog(workspace):
+    """Show dialog to select input files"""
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+
+    selected_files = {}
+
+    root = tk.Tk()
+    root.title("Input File Configuration")
+    root.geometry("700x550")
+
+    # Header
+    header_frame = tk.Frame(root, bg="#2c3e50", height=60)
+    header_frame.pack(fill="x")
+    header_frame.pack_propagate(False)
+
+    header_label = tk.Label(
+        header_frame,
+        text="Select Input Files for COC Report",
+        font=("Arial", 14, "bold"),
+        bg="#2c3e50",
+        fg="white",
+    )
+    header_label.pack(pady=15)
+
+    # Content frame
+    content_frame = tk.Frame(root, padx=30, pady=20)
+    content_frame.pack(fill="both", expand=True)
+
+    # Load existing config
+    existing_config = load_file_config(workspace)
+
+    # File selection entries
+    file_entries = {}
+    file_labels = {
+        "bom_old": "Old BOM (Excel):",
+        "bom_new": "New BOM (Excel):",
+        "schematic_old": "Old Schematic (PDF):",
+        "schematic_new": "New Schematic (PDF):",
+        "assembly_old": "Old Assembly Drawing (PDF):",
+        "assembly_new": "New Assembly Drawing (PDF):",
+    }
+
+    search_dir = (
+        workspace / "input_files" if (workspace / "input_files").exists() else workspace
+    )
+
+    def browse_file(key, file_type):
+        if file_type == "excel":
+            filetypes = [("Excel files", "*.xlsx"), ("All files", "*.*")]
+        else:
+            filetypes = [("PDF files", "*.PDF *.pdf"), ("All files", "*.*")]
+
+        filename = filedialog.askopenfilename(
+            initialdir=search_dir,
+            title=f"Select {file_labels[key]}",
+            filetypes=filetypes,
+        )
+
+        if filename:
+            file_entries[key].delete(0, tk.END)
+            file_entries[key].insert(0, filename)
+            selected_files[key] = filename
+
+    row = 0
+    for key, label_text in file_labels.items():
+        # Label
+        label = tk.Label(content_frame, text=label_text, font=("Arial", 10, "bold"))
+        label.grid(row=row, column=0, sticky="w", pady=8)
+
+        # Entry
+        entry = tk.Entry(content_frame, width=40, font=("Arial", 9))
+        entry.grid(row=row, column=1, sticky="ew", pady=8, padx=(10, 5))
+
+        # Pre-fill with existing config
+        if existing_config and existing_config.get(key):
+            entry.insert(0, existing_config[key])
+            selected_files[key] = existing_config[key]
+
+        file_entries[key] = entry
+
+        # Browse button
+        file_type = "excel" if "bom" in key else "pdf"
+        browse_btn = tk.Button(
+            content_frame,
+            text="Browse...",
+            command=lambda k=key, ft=file_type: browse_file(k, ft),
+            width=10,
+            font=("Arial", 9),
+            bg="#3498db",
+            fg="white",
+        )
+        browse_btn.grid(row=row, column=2, pady=8, padx=(5, 0))
+
+        row += 1
+
+    content_frame.columnconfigure(1, weight=1)
+
+    # Info label
+    info_label = tk.Label(
+        content_frame,
+        text="Files will be remembered for future runs",
+        font=("Arial", 9, "italic"),
+        fg="#7f8c8d",
+    )
+    info_label.grid(row=row, column=0, columnspan=3, pady=(15, 10))
+
+    # Buttons
+    button_frame = tk.Frame(content_frame)
+    button_frame.grid(row=row + 1, column=0, columnspan=3, pady=20)
+
+    result = [None]
+
+    def save_and_continue():
+        # Validate all files selected
+        missing = [
+            file_labels[k]
+            for k in file_labels
+            if k not in selected_files or not selected_files[k]
+        ]
+        if missing:
+            messagebox.showwarning(
+                "Missing Files",
+                f"Please select all files:\n" + "\n".join(f"- {m}" for m in missing),
+            )
+            return
+
+        # Validate files exist
+        for key, path in selected_files.items():
+            if not Path(path).exists():
+                messagebox.showerror("File Not Found", f"File does not exist:\n{path}")
+                return
+
+        # Save configuration
+        if save_file_config(workspace, selected_files):
+            result[0] = selected_files
+            root.destroy()
+        else:
+            messagebox.showerror("Error", "Failed to save configuration")
+
+    def skip_and_auto_detect():
+        result[0] = "auto"
+        root.destroy()
+
+    save_btn = tk.Button(
+        button_frame,
+        text="Save & Continue",
+        command=save_and_continue,
+        width=15,
+        font=("Arial", 10, "bold"),
+        bg="#27ae60",
+        fg="white",
+    )
+    save_btn.pack(side="left", padx=10)
+
+    auto_btn = tk.Button(
+        button_frame,
+        text="Auto-Detect Files",
+        command=skip_and_auto_detect,
+        width=15,
+        font=("Arial", 10),
+        bg="#95a5a6",
+        fg="white",
+    )
+    auto_btn.pack(side="left", padx=10)
+
+    # Center window
+    root.update_idletasks()
+    x = (root.winfo_screenwidth() // 2) - (root.winfo_width() // 2)
+    y = (root.winfo_screenheight() // 2) - (root.winfo_height() // 2)
+    root.geometry(f"+{x}+{y}")
+
+    root.mainloop()
+
+    return result[0]
+
+
 def auto_detect_config(workspace_path):
     """Automatically detect configuration from files in workspace"""
     import re
     from pathlib import Path
 
     workspace = Path(workspace_path)
+    logger.debug(f"auto_detect_config: workspace_path={workspace_path}")
 
-    # Find BOM files
-    bom_files = list(workspace.glob("*Bill of Materials*.xlsx"))
-    schematic_files = list(workspace.glob("*Schematic*.PDF"))
-    assembly_files = list(workspace.glob("*Assembly*.PDF"))
+    # Check for input_files directory first, fallback to workspace root
+    input_dir = workspace / "input_files"
+    search_dir = input_dir if input_dir.exists() else workspace
+    logger.debug(
+        f"auto_detect_config: input_dir={input_dir}, exists={input_dir.exists()}"
+    )
+    logger.debug(f"auto_detect_config: search_dir={search_dir}")
+
+    print(f"Searching for input files in: {search_dir}")  # Find BOM files
+    bom_files = list(search_dir.glob("*Bill of Materials*.xlsx"))
+    schematic_files = list(search_dir.glob("*Schematic*.PDF"))
+    assembly_files = list(search_dir.glob("*Assembly*.PDF"))
+
+    logger.debug(f"auto_detect_config: bom_files={[f.name for f in bom_files]}")
+    logger.debug(
+        f"auto_detect_config: schematic_files={[f.name for f in schematic_files]}"
+    )
+    logger.debug(
+        f"auto_detect_config: assembly_files={[f.name for f in assembly_files]}"
+    )
+
+    print(
+        f"Found {len(bom_files)} BOM file(s), {len(schematic_files)} schematic file(s), {len(assembly_files)} assembly file(s)"
+    )
 
     if len(bom_files) >= 2:
-        # Extract versions and sort by version number
-        pattern = r"([A-Z0-9]+)-(\d+|[A-Z]+\d*)\s*\(Bill of Materials\)"
-
-        bom_versions = []
+        # Extract metadata from BOM file contents
+        bom_metadata_list = []
         for bom_file in bom_files:
-            match = re.search(pattern, bom_file.name)
-            if match:
-                product = match.group(1)
-                version_str = match.group(2)
-                version_num = int(version_str) if version_str.isdigit() else 0
-                bom_versions.append((bom_file, product, version_str, version_num))
+            metadata = extract_bom_metadata(bom_file)
+            # Try to extract version from metadata, fallback to filename
+            version_num = 0
+            if metadata["version"] is not None:
+                version_num = (
+                    int(metadata["version"]) if metadata["version"].isdigit() else 0
+                )
+            else:
+                # Fallback: Extract version from filename (e.g., "BT3413A-8")
+                match = re.search(r"-(\d+)", bom_file.name)
+                if match:
+                    version_num = int(match.group(1))
 
-        if len(bom_versions) >= 2:
+            bom_metadata_list.append((bom_file, metadata, version_num))
+
+        if len(bom_metadata_list) >= 2:
             # Sort by version number
-            bom_versions.sort(key=lambda x: x[3])
+            bom_metadata_list.sort(key=lambda x: x[2])
 
-            bom_old, product_old, version_old_str, _ = bom_versions[0]
-            bom_new, product_new, version_new_str, _ = bom_versions[1]
+            bom_old, metadata_old, _ = bom_metadata_list[0]
+            bom_new, metadata_new, _ = bom_metadata_list[1]
 
             CONFIG["bom_old_filename"] = bom_old.name
             CONFIG["bom_new_filename"] = bom_new.name
-            CONFIG["product_name"] = product_old
+
+            # Use product name from BOM contents
+            CONFIG["product_name"] = (
+                metadata_old["product_name"] or metadata_old["assembly_no"][:7]
+                if metadata_old["assembly_no"]
+                else "Unknown"
+            )
+
+            # Use version from BOM contents or filename
             CONFIG["version_old"] = (
-                f"V{version_old_str}" if version_old_str.isdigit() else version_old_str
+                f"V{metadata_old['version']}"
+                if metadata_old["version"]
+                else f"V{bom_metadata_list[0][2]}"
             )
             CONFIG["version_new"] = (
-                f"V{version_new_str}" if version_new_str.isdigit() else version_new_str
+                f"V{metadata_new['version']}"
+                if metadata_new["version"]
+                else f"V{bom_metadata_list[1][2]}"
             )
+
+            # Store variant information
+            CONFIG["variant_old"] = metadata_old["variant"] or ""
+            CONFIG["variant_letter_old"] = metadata_old["variant_letter"] or ""
+            CONFIG["variant_new"] = metadata_new["variant"] or ""
+            CONFIG["variant_letter_new"] = metadata_new["variant_letter"] or ""
 
     if len(schematic_files) >= 2:
         # Sort schematic files by version number
@@ -110,21 +469,6 @@ def auto_detect_config(workspace_path):
             assembly_versions.sort(key=lambda x: x[1])
             CONFIG["assembly_old_filename"] = assembly_versions[0][0].name
             CONFIG["assembly_new_filename"] = assembly_versions[1][0].name
-
-    # Print detected configuration
-    print("\n" + "=" * 60)
-    print("AUTO-DETECTED CONFIGURATION")
-    print("=" * 60)
-    print(f"Product Name: {CONFIG['product_name']}")
-    print(f"Old Version: {CONFIG['version_old']}")
-    print(f"New Version: {CONFIG['version_new']}")
-    print(f"BOM Old: {CONFIG['bom_old_filename']}")
-    print(f"BOM New: {CONFIG['bom_new_filename']}")
-    print(f"Schematic Old: {CONFIG['schematic_old_filename']}")
-    print(f"Schematic New: {CONFIG['schematic_new_filename']}")
-    print(f"Assembly Old: {CONFIG['assembly_old_filename']}")
-    print(f"Assembly New: {CONFIG['assembly_new_filename']}")
-    print("=" * 60)
 
 
 # ============================================================================
@@ -389,7 +733,13 @@ class COCReportGenerator:
         # Create GUI window
         root = tk.Tk()
         root.title("Component Change Reasons")
-        root.geometry("700x650")
+        root.geometry("750x800")
+
+        # Bring window to front
+        root.lift()
+        root.attributes("-topmost", True)
+        root.after_idle(root.attributes, "-topmost", False)
+        root.focus_force()
 
         # Track current component index and screen state
         current_index = [0]
@@ -409,14 +759,142 @@ class COCReportGenerator:
         )
         header_label.pack(pady=15)
 
-        # Main content frame
-        content_frame = tk.Frame(root, padx=20, pady=20)
+        # Create canvas and scrollbar for scrollable content
+        canvas = tk.Canvas(root)
+        scrollbar = tk.Scrollbar(root, orient="vertical", command=canvas.yview)
+        scrollable_frame = tk.Frame(canvas)
+
+        scrollable_frame.bind(
+            "<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        scrollbar.pack(side="right", fill="y")
+
+        # Main content frame inside scrollable area
+        content_frame = tk.Frame(scrollable_frame, padx=20, pady=20)
         content_frame.pack(fill="both", expand=True)
 
         def show_creator_info():
             """Show document creator information and signature screen"""
             for widget in content_frame.winfo_children():
                 widget.destroy()
+
+            # Version Information Frame
+            version_frame = tk.LabelFrame(
+                content_frame,
+                text="Product Version Information",
+                font=("Arial", 11, "bold"),
+                padx=20,
+                pady=15,
+                bg="#ecf0f1",
+            )
+            version_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+            version_frame.columnconfigure((0, 1, 2), weight=1)
+
+            # Product Name
+            product_label = tk.Label(
+                version_frame,
+                text=f"Product: {CONFIG['product_name']}",
+                font=("Arial", 12, "bold"),
+                bg="#ecf0f1",
+            )
+            product_label.grid(row=0, column=0, columnspan=3, pady=(0, 10))
+
+            # Old Version Column
+            old_header = tk.Label(
+                version_frame,
+                text="OLD VERSION",
+                font=("Arial", 10, "bold"),
+                bg="#e74c3c",
+                fg="white",
+                padx=10,
+                pady=5,
+            )
+            old_header.grid(row=1, column=0, sticky="ew", padx=(0, 5))
+
+            old_version = tk.Label(
+                version_frame,
+                text=f"Version: {CONFIG['version_old']}",
+                font=("Arial", 9),
+                bg="#ecf0f1",
+                anchor="w",
+            )
+            old_version.grid(row=2, column=0, sticky="ew", padx=(0, 5), pady=2)
+
+            if CONFIG.get("variant_old"):
+                old_variant = tk.Label(
+                    version_frame,
+                    text=f"Variant: {CONFIG['variant_old']} {CONFIG.get('variant_letter_old', '')}",
+                    font=("Arial", 9),
+                    bg="#ecf0f1",
+                    anchor="w",
+                )
+                old_variant.grid(row=3, column=0, sticky="ew", padx=(0, 5), pady=2)
+
+            old_bom = tk.Label(
+                version_frame,
+                text=f"BOM: {CONFIG['bom_old_filename'][:30]}...",
+                font=("Arial", 8),
+                bg="#ecf0f1",
+                fg="#555",
+                anchor="w",
+            )
+            old_bom.grid(row=4, column=0, sticky="ew", padx=(0, 5), pady=2)
+
+            # Arrow/Change Indicator
+            arrow_label = tk.Label(
+                version_frame,
+                text="→",
+                font=("Arial", 24, "bold"),
+                bg="#ecf0f1",
+                fg="#3498db",
+            )
+            arrow_label.grid(row=1, column=1, rowspan=4, padx=5)
+
+            # New Version Column
+            new_header = tk.Label(
+                version_frame,
+                text="NEW VERSION",
+                font=("Arial", 10, "bold"),
+                bg="#27ae60",
+                fg="white",
+                padx=10,
+                pady=5,
+            )
+            new_header.grid(row=1, column=2, sticky="ew", padx=(5, 0))
+
+            new_version = tk.Label(
+                version_frame,
+                text=f"Version: {CONFIG['version_new']}",
+                font=("Arial", 9),
+                bg="#ecf0f1",
+                anchor="w",
+            )
+            new_version.grid(row=2, column=2, sticky="ew", padx=(5, 0), pady=2)
+
+            if CONFIG.get("variant_new"):
+                new_variant = tk.Label(
+                    version_frame,
+                    text=f"Variant: {CONFIG['variant_new']} {CONFIG.get('variant_letter_new', '')}",
+                    font=("Arial", 9),
+                    bg="#ecf0f1",
+                    anchor="w",
+                )
+                new_variant.grid(row=3, column=2, sticky="ew", padx=(5, 0), pady=2)
+
+            new_bom = tk.Label(
+                version_frame,
+                text=f"BOM: {CONFIG['bom_new_filename'][:30]}...",
+                font=("Arial", 8),
+                bg="#ecf0f1",
+                fg="#555",
+                anchor="w",
+            )
+            new_bom.grid(row=4, column=2, sticky="ew", padx=(5, 0), pady=2)
 
             # Single grouped frame for all information
             info_frame = tk.LabelFrame(
@@ -426,7 +904,7 @@ class COCReportGenerator:
                 padx=20,
                 pady=15,
             )
-            info_frame.grid(row=0, column=0, sticky="ew", pady=10)
+            info_frame.grid(row=1, column=0, sticky="ew", pady=10)
             info_frame.columnconfigure(1, weight=1)
 
             # Created by field
@@ -525,7 +1003,7 @@ class COCReportGenerator:
 
             # Button frame
             btn_frame = tk.Frame(content_frame)
-            btn_frame.grid(row=1, column=0, pady=30)
+            btn_frame.grid(row=2, column=0, pady=30)
 
             next_btn = tk.Button(
                 btn_frame,
@@ -736,6 +1214,12 @@ class COCReportGenerator:
         # Show creator info screen first
         show_creator_info()
 
+        # Enable mouse wheel scrolling
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind_all("<MouseWheel>", on_mousewheel)
+
         # Center window on screen
         root.update_idletasks()
         x = (root.winfo_screenwidth() // 2) - (root.winfo_width() // 2)
@@ -750,8 +1234,25 @@ class COCReportGenerator:
     def load_bom(self, file_path):
         """Load BOM from Excel file"""
         try:
-            # Load with header at row 10 (0-indexed)
-            df = pd.read_excel(file_path, header=10)
+            # First, find the header row by looking for "SeqNum" or similar markers
+            import openpyxl
+
+            wb = openpyxl.load_workbook(file_path)
+            ws = wb.active
+
+            header_row_idx = None
+            for idx, row in enumerate(ws.iter_rows(max_row=20, values_only=True)):
+                if row and any(cell and "SeqNum" in str(cell) for cell in row):
+                    header_row_idx = idx
+                    break
+            wb.close()
+
+            # Default to row 10 if not found
+            if header_row_idx is None:
+                header_row_idx = 9  # 0-indexed, so row 10
+
+            # Load with detected header row
+            df = pd.read_excel(file_path, header=header_row_idx)
             # Drop rows with all NaN
             df = df.dropna(how="all")
             # Drop columns with all NaN
@@ -1698,24 +2199,144 @@ class COCReportGenerator:
 
 def main():
     workspace = Path(__file__).parent
+    logger.debug(f"main: workspace={workspace}")
+    logger.debug(f"main: DEBUG_MODE={DEBUG_MODE}")
 
-    # Auto-detect configuration from files
-    auto_detect_config(workspace)
+    # Check if user wants to configure files manually
+    use_file_selector = "--configure" in sys.argv or "-c" in sys.argv
 
+    # Load existing config
+    file_config = load_file_config(workspace)
+
+    # Show file selector if requested or no config exists
+    if use_file_selector or not file_config:
+        print("\n" + "=" * 60)
+        print("FILE SELECTION")
+        print("=" * 60)
+        result = show_file_selector_dialog(workspace)
+
+        if result == "auto":
+            print("User chose auto-detection")
+            file_config = None
+        elif result:
+            file_config = result
+            print("✓ Files configured successfully")
+        else:
+            print("❌ File selection cancelled")
+            return
+
+    # STEP 1: Extract version & variant from BOM files
+    print("\n" + "=" * 60)
+    print("STEP 1: EXTRACTING VERSION & VARIANT FROM BOM FILES")
     print("=" * 60)
+    logger.debug("main: Calling auto_detect_config")
+
+    if file_config:
+        # Use configured files
+        print(f"Using configured files from: input_files_config.json")
+        logger.debug(f"Using file_config: {file_config}")
+
+        # Set CONFIG from file paths
+        CONFIG["bom_old_filename"] = Path(file_config["bom_old"]).name
+        CONFIG["bom_new_filename"] = Path(file_config["bom_new"]).name
+        CONFIG["schematic_old_filename"] = Path(file_config["schematic_old"]).name
+        CONFIG["schematic_new_filename"] = Path(file_config["schematic_new"]).name
+        CONFIG["assembly_old_filename"] = Path(file_config["assembly_old"]).name
+        CONFIG["assembly_new_filename"] = Path(file_config["assembly_new"]).name
+
+        # Extract metadata from configured BOMs
+        bom_old_path = Path(file_config["bom_old"])
+        bom_new_path = Path(file_config["bom_new"])
+
+        metadata_old = extract_bom_metadata(bom_old_path)
+        metadata_new = extract_bom_metadata(bom_new_path)
+
+        # Set product info
+        CONFIG["product_name"] = (
+            metadata_old["product_name"] or metadata_old["assembly_no"][:7]
+            if metadata_old["assembly_no"]
+            else "Unknown"
+        )
+
+        CONFIG["version_old"] = (
+            f"V{metadata_old['version']}" if metadata_old["version"] else "V1"
+        )
+        CONFIG["version_new"] = (
+            f"V{metadata_new['version']}" if metadata_new["version"] else "V2"
+        )
+
+        CONFIG["variant_old"] = metadata_old["variant"] or ""
+        CONFIG["variant_letter_old"] = metadata_old["variant_letter"] or ""
+        CONFIG["variant_new"] = metadata_new["variant"] or ""
+        CONFIG["variant_letter_new"] = metadata_new["variant_letter"] or ""
+
+    else:
+        # Auto-detect from directory
+        auto_detect_config(workspace)
+
+    # Validate that version and variant information was found
+    if not CONFIG.get("bom_old_filename") or not CONFIG.get("bom_new_filename"):
+        print("\n❌ ERROR: Could not find BOM files for version detection!")
+        print(f"   BOM old filename: {CONFIG.get('bom_old_filename')}")
+        print(f"   BOM new filename: {CONFIG.get('bom_new_filename')}")
+        print("   Please run with --configure flag to manually select files:")
+        print("   python create_report.py --configure")
+        return
+
+    if not CONFIG.get("version_old") or not CONFIG.get("version_new"):
+        print("\n⚠️  WARNING: Version information not found in BOM metadata")
+        print("   Using fallback version detection from filenames")
+
+    # Display extracted configuration
+    print("\n" + "=" * 60)
+    print("AUTO-DETECTED CONFIGURATION (from BOM contents)")
+    print("=" * 60)
+    print(f"Product Name: {CONFIG['product_name']}")
+    print(f"Old Version: {CONFIG['version_old']}")
+    print(f"New Version: {CONFIG['version_new']}")
+    if CONFIG.get("variant_old"):
+        print(
+            f"Old Variant: {CONFIG['variant_old']} {CONFIG.get('variant_letter_old', '')}"
+        )
+    if CONFIG.get("variant_new"):
+        print(
+            f"New Variant: {CONFIG['variant_new']} {CONFIG.get('variant_letter_new', '')}"
+        )
+    print(f"BOM Old: {CONFIG['bom_old_filename']}")
+    print(f"BOM New: {CONFIG['bom_new_filename']}")
+    print(f"Schematic Old: {CONFIG['schematic_old_filename']}")
+    print(f"Schematic New: {CONFIG['schematic_new_filename']}")
+    print(f"Assembly Old: {CONFIG['assembly_old_filename']}")
+    print(f"Assembly New: {CONFIG['assembly_new_filename']}")
+    print("=" * 60)
+
+    print("\n" + "=" * 60)
     print(f"{CONFIG['product_name']} COC Report Generator")
     print("=" * 60)
 
     # Initialize generator
     generator = COCReportGenerator(workspace)
 
-    # Define file paths from CONFIG
-    bom_old = workspace / CONFIG["bom_old_filename"]
-    bom_new = workspace / CONFIG["bom_new_filename"]
-    schematic_old = workspace / CONFIG["schematic_old_filename"]
-    schematic_new = workspace / CONFIG["schematic_new_filename"]
-    assembly_old = workspace / CONFIG["assembly_old_filename"]
-    assembly_new = workspace / CONFIG["assembly_new_filename"]
+    # Define file paths - use configured paths if available
+    if file_config:
+        bom_old = Path(file_config["bom_old"])
+        bom_new = Path(file_config["bom_new"])
+        schematic_old = Path(file_config["schematic_old"])
+        schematic_new = Path(file_config["schematic_new"])
+        assembly_old = Path(file_config["assembly_old"])
+        assembly_new = Path(file_config["assembly_new"])
+    else:
+        # Check for input_files directory
+        input_dir = workspace / "input_files"
+        search_dir = input_dir if input_dir.exists() else workspace
+
+        # Define file paths from CONFIG
+        bom_old = search_dir / CONFIG["bom_old_filename"]
+        bom_new = search_dir / CONFIG["bom_new_filename"]
+        schematic_old = search_dir / CONFIG["schematic_old_filename"]
+        schematic_new = search_dir / CONFIG["schematic_new_filename"]
+        assembly_old = search_dir / CONFIG["assembly_old_filename"]
+        assembly_new = search_dir / CONFIG["assembly_new_filename"]
 
     # Store PDF paths for linking
     generator.pdf_paths = {
@@ -1748,9 +2369,13 @@ def main():
     # Prompt for change reasons (questionnaire)
     generator.prompt_for_change_reasons()
 
-    # Generate report
+    # Create reports directory if it doesn't exist
+    reports_dir = workspace / "coc_reports"
+    reports_dir.mkdir(exist_ok=True)
+
+    # Generate report in the reports directory
     output_file = (
-        workspace
+        reports_dir
         / f"COC_Report_{CONFIG['product_name']}_{CONFIG['version_old']}_to_{CONFIG['version_new']}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
     )
     generator.generate_word_report(output_file)

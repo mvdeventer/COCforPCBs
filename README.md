@@ -50,48 +50,74 @@ Files are automatically sorted by version number (8 < 10)
 
 ## How to Use
 
+### Quick Start (Recommended)
+
+```powershell
+# Generate COC report (automatically uses venv)
+python create_report.py
+```
+
 ### 1. Generate COC Report
 
-Place your files in the workspace folder and run:
+**Option A: Use Quick Launcher (Auto-Venv)**
+```powershell
+python create_report.py
+```
 
+**Option B: Run Directly**
 ```powershell
 python generate_coc_report.py
 ```
 
 The script will:
 
-1. Auto-detect product name and versions from filenames
+1. Auto-detect product name and versions from BOM file contents
 2. Compare BOMs and analyze PDFs
 3. Launch GUI questionnaire for change documentation
 4. Generate professional Word report
 
-**Output**: `COC_Report_PRODUCT_VOLD_to_VNEW_YYYYMMDD_HHMMSS.docx`
+**Output**: `coc_reports/COC_Report_PRODUCT_VOLD_to_VNEW_YYYYMMDD_HHMMSS.docx`
 
-### 2. Release to GitHub
+### 2. Build Executables
 
-Create versioned releases with automatic archiving:
+**Build EXE Only:**
+```powershell
+python build_exe.py
+```
+
+**Build Complete Installer:**
+```powershell
+python build_installer.py
+```
+
+Both scripts automatically use the virtual environment.
+
+**Output:**
+- `dist/COC_Report_Generator.exe`
+- `dist/installer/COC_Report_Generator_Setup_X.X.X.exe`
+
+### 3. Release to GitHub
+
+Create versioned releases with automatic version management:
 
 ```powershell
-python scripts/release.py
+# Fully automated release
+python scripts/release.py --auto
 ```
 
 The release script will:
 
-1. ✅ Archive old reports to `reports_archive/YYYY/MM/`
-2. ✅ Detect latest version from GitHub tags
-3. ✅ Offer version bump options (or auto-detect with Enter)
-4. ✅ Collect changelog entries interactively
-5. ✅ Commit changes with version tag
-6. ✅ Push to GitHub repository
-7. ✅ Create GitHub release with notes (if `gh` CLI installed)
-
-**Quick Release**: Just press Enter at version prompt for automatic patch bump!
+1. ✅ Analyze commits to determine version bump
+2. ✅ Update version files automatically
+3. ✅ Commit changes with version tag
+4. ✅ Push to GitHub repository
+5. ✅ Create GitHub release with notes (if `gh` CLI installed)
 
 **Version Management**:
 
-- **Patch** (v1.0.1): Bug fixes, small changes (auto-selected)
-- **Minor** (v1.1.0): New features, enhancements
-- **Major** (v2.0.0): Breaking changes, major updates
+- `fix:` commits → **Patch** (v1.0.1): Bug fixes
+- `feat:` commits → **Minor** (v1.1.0): New features
+- `BREAKING CHANGE:` → **Major** (v2.0.0): Breaking changes
 
 ## Report Contents
 
@@ -200,9 +226,15 @@ To contribute:
 
 1. Fork the repository
 2. Make your changes
-3. Update relevant documentation (see `.copilot/instructions.md`)
-4. Run `python scripts/release.py` to create a versioned release
-5. Submit pull request
+3. Commit your changes (version files are auto-updated via pre-commit hook)
+4. Update relevant documentation (see `.copilot/instructions.md`)
+5. Run `python scripts/release.py --auto` to create a versioned release
+6. Submit pull request
+
+**Version Management**:
+- Version files (`version_info.txt`, `installer.iss`) are automatically updated before each commit
+- See [VERSION_MANAGEMENT.md](VERSION_MANAGEMENT.md) for details
+- Pre-commit hook ensures consistency across all version files
 
 **Note**: Copilot will automatically remind you to update documentation files when making code changes.
 

@@ -392,6 +392,18 @@ class GitHubReleaseManager:
         print("Changes to commit:")
         print(status)
 
+        # Update version files before commit
+        print("\n🔄 Updating version files...")
+        update_script = self.workspace / "scripts" / "update_version_files.py"
+        if update_script.exists():
+            result = self.run_command(f"python {update_script}", check=False)
+            if result is not None:
+                print("✅ Version files updated")
+            else:
+                print("⚠️  Version file update failed (continuing anyway)")
+        else:
+            print("⚠️  update_version_files.py not found (skipping)")
+
         # Add all changes
         self.run_command("git add .")
 
