@@ -3,10 +3,16 @@ Pre-commit script to update version files before Git commit
 Updates version_info.txt, installer.iss, and other version-dependent files
 """
 
+import io
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+# Force UTF-8 encoding for stdout/stderr on Windows
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 
 def get_latest_version():
@@ -31,7 +37,7 @@ def update_version_info(clean_version):
     """Update version_info.txt with current version"""
     version_file = Path("version_info.txt")
     if not version_file.exists():
-        print(f"⚠️  {version_file} not found")
+        print(f"[WARNING] {version_file} not found")
         return False
 
     # Parse version parts
@@ -57,7 +63,7 @@ def update_version_info(clean_version):
     )
 
     version_file.write_text(content, encoding="utf-8")
-    print(f"✅ Updated {version_file}")
+    print(f"[OK] Updated {version_file}")
     return True
 
 
@@ -65,7 +71,7 @@ def update_installer_iss(clean_version):
     """Update installer.iss with current version"""
     installer_file = Path("installer.iss")
     if not installer_file.exists():
-        print(f"⚠️  {installer_file} not found")
+        print(f"[WARNING] {installer_file} not found")
         return False
 
     content = installer_file.read_text(encoding="utf-8")
@@ -73,7 +79,7 @@ def update_installer_iss(clean_version):
         r'#define AppVersion ".*?"', f'#define AppVersion "{clean_version}"', content
     )
     installer_file.write_text(content, encoding="utf-8")
-    print(f"✅ Updated {installer_file}")
+    print(f"[OK] Updated {installer_file}")
     return True
 
 
@@ -81,17 +87,17 @@ def update_changelog(version):
     """Update CHANGELOG.md with unreleased changes"""
     changelog_file = Path("CHANGELOG.md")
     if not changelog_file.exists():
-        print(f"⚠️  {changelog_file} not found")
+        print(f"[WARNING] {changelog_file} not found")
         return False
 
     content = changelog_file.read_text(encoding="utf-8")
 
     # Check if there's already an entry for this version
     if f"## [{version.lstrip('v')}]" in content:
-        print(f"✅ CHANGELOG.md already has entry for {version}")
+        print(f"[OK] CHANGELOG.md already has entry for {version}")
         return True
 
-    print(f"ℹ️  CHANGELOG.md - manual update recommended for {version}")
+    print(f"[INFO] CHANGELOG.md - manual update recommended for {version}")
     return True
 
 
@@ -105,7 +111,7 @@ def stage_updated_files():
     for file in files_to_stage:
         if Path(file).exists():
             subprocess.run(["git", "add", file], check=False)
-            print(f"📝 Staged {file}")
+            print(f"[STAGED] {file}")
 
 
 def main():
@@ -116,7 +122,7 @@ def main():
 
     # Get current version
     version, clean_version = get_latest_version()
-    print(f"📌 Current version: {version}")
+    print(f"[VERSION] Current version: {version}")
     print()
 
     # Update all version files
@@ -137,12 +143,12 @@ def main():
 
     print()
     print("=" * 60)
-    print("✅ Version files updated")
+    print("[SUCCESS] Version files updated")
     print("=" * 60)
     print()
     print(f"Files updated: {', '.join(updated)}")
     print()
-    print("💡 Tip: These files have been staged for commit")
+    print("[TIP] These files have been staged for commit")
     print()
 
     return 0

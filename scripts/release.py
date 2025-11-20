@@ -1,641 +1,522 @@
+#!/usr/bin/env python3
 """
-GitHub Release Script
-Automates version detection, commit, tagging, and release to GitHub
-Organizes old reports into archive folders
+COC Report Generator - Comprehensive Release Script
+
+Fetches latest version from GitHub, auto-increments, updates all files,
+creates commits, tags, builds executable and installer, and publishes releases.
+
+Usage:
+    python scripts/release.py              # Auto-increment and full release
+    python scripts/release.py --patch      # Force patch (x.x.X)
+    python scripts/release.py --minor      # Force minor (x.X.0)
+    python scripts/release.py --major      # Force major (X.0.0)
+    python scripts/release.py --version 1.1.0  # Specific version
+    python scripts/release.py --dry-run    # Preview only
+    python scripts/release.py --push-only  # Commit and push only (no build/version bump)
+    python scripts/release.py --build-only # Build executable only (no git operations)
+    python scripts/release.py --skip-push  # Skip git push operations
+    python scripts/release.py --skip-build # Skip building executable/installer
+
+Examples:
+    python scripts/release.py --dry-run           # Preview changes
+    python scripts/release.py --patch             # Quick patch release
+    python scripts/release.py --version 1.1.0     # Specific version release
 """
 
-import json
+import argparse
 import re
+import shutil
 import subprocess
 import sys
-import urllib.error
-import urllib.request
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
 
-class GitHubReleaseManager:
-    def __init__(self, workspace_path):
-        self.workspace = Path(workspace_path)
-        self.version = None
-        self.previous_version = None
-        self.changelog = []
+class Spinner:
+    """Animated spinner for progress indication"""
 
-    def run_command(self, cmd, capture_output=True, check=True):
-        """Run a shell command and return output"""
-        try:
-            result = subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=capture_output,
-                text=True,
-                check=check,
-                cwd=self.workspace,
-            )
-            return result.stdout.strip() if capture_output else ""
-        except subprocess.CalledProcessError as e:
-            print(f"❌ Command failed: {cmd}")
-            print(f"Error: {e.stderr if e.stderr else str(e)}")
-            return None
+    def __init__(self, message="Processing..."):
+        self.message = message
+        self.spinning = False
+        self.thread = None
 
-    def check_git_repo(self):
-        """Check if git repository exists, initialize if not"""
-        git_dir = self.workspace / ".git"
-        if not git_dir.exists():
-            print("📁 Initializing git repository...")
-            self.run_command("git init")
-            print("✅ Git repository initialized")
-            return False
-        return True
+    def spin(self):
+        chars = "|/-\\"
+        i = 0
+        while self.spinning:
+            sys.stdout.write(f"\r{self.message} {chars[i % len(chars)]}")
+            sys.stdout.flush()
+            time.sleep(0.1)
+            i += 1
 
-    def get_remote_url(self):
-        """Get the GitHub remote URL"""
-        remote = self.run_command("git remote get-url origin", check=False)
-        return remote if remote else None
+    def start(self):
+        self.spinning = True
+        self.thread = threading.Thread(target=self.spin)
+        self.thread.start()
 
-    def get_github_repo_info(self):
-        """Extract owner and repo from remote URL"""
-        remote_url = self.get_remote_url()
-        if not remote_url:
-            return None, None
-
-        # Parse GitHub URL
-        match = re.search(r"github\.com[:/]([^/]+)/([^/.]+)", remote_url)
-        if match:
-            return match.group(1), match.group(2)
-        return None, None
-
-    def get_latest_github_release(self):
-        """Get latest release from GitHub API"""
-        owner, repo = self.get_github_repo_info()
-        if not owner or not repo:
-            return None
-
-        try:
-            url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
-            req = urllib.request.Request(url)
-            req.add_header("Accept", "application/vnd.github.v3+json")
-
-            with urllib.request.urlopen(req, timeout=10) as response:
-                data = json.loads(response.read())
-                return data.get("tag_name")
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                print("📌 No releases found on GitHub")
-            return None
-        except Exception as e:
-            print(f"⚠️  Could not fetch GitHub releases: {e}")
-            return None
-
-    def analyze_commit_type(self):
-        """Analyze commits to determine version bump type"""
-        if self.previous_version:
-            git_log = self.run_command(
-                f"git log {self.previous_version}..HEAD --oneline", check=False
-            )
+    def stop(self, final_message=""):
+        self.spinning = False
+        if self.thread:
+            self.thread.join()
+        if final_message:
+            sys.stdout.write(f"\r{final_message}\n")
         else:
-            git_log = self.run_command("git log --oneline -20", check=False)
+            sys.stdout.write(f"\r{self.message} Done\n")
+        sys.stdout.flush()
 
-        if not git_log:
-            return "patch"
 
-        # Check for breaking changes
-        if re.search(r"BREAKING[- ]CHANGE|!:", git_log, re.IGNORECASE):
-            return "major"
+def run(cmd, check=True):
+    """Execute shell command and return output"""
+    result = subprocess.run(
+        cmd,
+        shell=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if check and result.returncode != 0:
+        print(f"[ERROR] Command failed: {cmd}")
+        if result.stderr:
+            print(f"[ERROR] {result.stderr}")
+        sys.exit(1)
+    return result.stdout.strip()
 
-        # Check for features
-        if re.search(
-            r"^[a-f0-9]+ (feat|feature)[(:]", git_log, re.MULTILINE | re.IGNORECASE
-        ):
-            return "minor"
 
-        # Default to patch for fixes and other changes
-        return "patch"
+def get_python_command():
+    """Get the correct Python command to use (venv if available, otherwise system Python)"""
+    venv_python = Path(".venv/Scripts/python.exe")
+    if venv_python.exists():
+        return str(venv_python)
+    return "python"
 
-    def setup_remote(self, auto_mode=False):
-        """Setup GitHub remote if not configured"""
-        remote_url = self.get_remote_url()
 
-        if not remote_url:
-            if auto_mode:
-                print("\n❌ No git remote configured")
-                print("Please run: git remote add origin <your-github-repo-url>")
-                return False
-
-            print("\n🔗 GitHub Remote Setup")
-            print("=" * 60)
-            print("Please provide your GitHub repository information:")
-            username = input("GitHub username: ").strip().replace("@", "")
-            repo_name = input("Repository name: ").strip()
-
-            if not username or not repo_name:
-                print("❌ Username and repository name are required")
-                return False
-
-            remote_url = f"https://github.com/{username}/{repo_name}.git"
-
-            # Remove existing origin if it exists with wrong URL
-            self.run_command("git remote remove origin", check=False)
-
-            self.run_command(f'git remote add origin "{remote_url}"')
-            print(f"✅ Remote added: {remote_url}")
-        else:
-            print(f"✅ Remote configured: {remote_url}")
-
-        return True
-
-    def get_latest_tag(self):
-        """Get the latest version tag from git or GitHub"""
-        # Try GitHub first
-        github_release = self.get_latest_github_release()
-        if github_release:
-            print(f"📌 Latest GitHub release: {github_release}")
-            return github_release
-
-        # Fall back to local git tags
-        tags = self.run_command("git tag --sort=-v:refname", check=False)
+def get_latest_github_tag():
+    """Fetch latest version tag from GitHub"""
+    try:
+        tags = run("gh release list --limit 1", check=False)
         if tags:
-            latest = tags.split("\n")[0]
-            print(f"📌 Latest local tag: {latest}")
-            return latest
-        print("📌 No existing tags found")
-        return None
+            match = re.search(r"v(\d+\.\d+\.\d+)", tags)
+            if match:
+                return match.group(1)
+    except Exception:
+        pass
 
-    def parse_version(self, version_str):
-        """Parse version string (e.g., 'v1.2.3' -> [1, 2, 3])"""
-        if not version_str:
-            return [0, 0, 0]
-
-        match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", version_str)
-        if match:
-            return [int(match.group(1)), int(match.group(2)), int(match.group(3))]
-        return [0, 0, 0]
-
-    def increment_version(self, version_str, bump_type="patch"):
-        """Increment version number (major.minor.patch)"""
-        major, minor, patch = self.parse_version(version_str)
-
-        if bump_type == "major":
-            major += 1
-            minor = 0
-            patch = 0
-        elif bump_type == "minor":
-            minor += 1
-            patch = 0
-        else:  # patch
-            patch += 1
-
-        return f"v{major}.{minor}.{patch}"
-
-    def get_new_version(self, auto_mode=False, bump_type=None):
-        """Determine new version number"""
-        latest_tag = self.get_latest_tag()
-
-        if auto_mode:
-            # Fully automated - analyze commits to determine bump type
-            if bump_type:
-                detected_bump = bump_type
-            else:
-                detected_bump = self.analyze_commit_type()
-
-            if latest_tag:
-                new_version = self.increment_version(latest_tag, detected_bump)
-                print(
-                    f"\n📊 Auto-incrementing version ({detected_bump}): {latest_tag} → {new_version}"
-                )
-            else:
-                new_version = "v1.0.0"
-                print(f"\n📊 Starting new version: {new_version}")
-            return new_version
-
-        print("\n📊 Version Selection")
-        print("=" * 60)
-        if latest_tag:
-            print(f"Current version: {latest_tag}")
-            print("\nVersion bump options:")
-            print(
-                f"  1. Patch  : {self.increment_version(latest_tag, 'patch')} (bug fixes)"
-            )
-            print(
-                f"  2. Minor  : {self.increment_version(latest_tag, 'minor')} (new features)"
-            )
-            print(
-                f"  3. Major  : {self.increment_version(latest_tag, 'major')} (breaking changes)"
-            )
-            print("  4. Custom : Enter your own version")
-            print("  5. Auto   : Auto-detect from git (uses patch by default)")
-        else:
-            print("No previous version found. Starting fresh.")
-            print("\nVersion options:")
-            print("  1. Start with v1.0.0")
-            print("  2. Custom version")
-
-        choice = input("\nSelect option (1-5 or press Enter for auto): ").strip()
-
-        if latest_tag:
-            if choice == "" or choice == "5":
-                # Auto-detect: use patch by default
-                print("✓ Auto-detecting version bump...")
-                return self.increment_version(latest_tag, "patch")
-            elif choice == "1":
-                return self.increment_version(latest_tag, "patch")
-            elif choice == "2":
-                return self.increment_version(latest_tag, "minor")
-            elif choice == "3":
-                return self.increment_version(latest_tag, "major")
-            elif choice == "4":
-                custom = input("Enter version (e.g., v1.2.3): ").strip()
-                if not custom.startswith("v"):
-                    custom = "v" + custom
-                return custom
-            else:
-                # Default to patch
-                return self.increment_version(latest_tag, "patch")
-        else:
-            if choice == "" or choice == "1":
-                return "v1.0.0"
-            else:
-                custom = input("Enter version (e.g., v1.0.0): ").strip()
-                if not custom.startswith("v"):
-                    custom = "v" + custom
-                return custom
-
-    def archive_old_reports(self):
-        """Move old COC reports to archive folder"""
-        print("\n📦 Archiving Old Reports")
-        print("=" * 60)
-
-        archive_dir = self.workspace / "reports_archive"
-        archive_dir.mkdir(exist_ok=True)
-
-        # Find all COC report files
-        report_files = list(self.workspace.glob("COC_Report_*.docx"))
-
-        if not report_files:
-            print("No reports found to archive")
-            return 0
-
-        archived_count = 0
-        skipped_count = 0
-
-        for report in report_files:
-            try:
-                # Extract timestamp from filename
-                match = re.search(r"(\d{8})_(\d{6})", report.name)
+    # Fallback to git tags
+    try:
+        tags = run("git tag --sort=-v:refname", check=False)
+        if tags:
+            lines = tags.split("\n")
+            for line in lines:
+                match = re.search(r"v(\d+\.\d+\.\d+)", line)
                 if match:
-                    date_str = match.group(1)  # YYYYMMDD
-                    year = date_str[:4]
-                    month = date_str[4:6]
+                    return match.group(1)
+    except Exception:
+        pass
 
-                    # Create year/month folder structure
-                    dest_dir = archive_dir / year / month
-                    dest_dir.mkdir(parents=True, exist_ok=True)
+    return "0.0.0"
 
-                    dest_path = dest_dir / report.name
-                    report.rename(dest_path)
-                    print(f"  ✓ Archived: {report.name} → {year}/{month}/")
-                    archived_count += 1
-                else:
-                    # No timestamp, just move to archive root
-                    dest_path = archive_dir / report.name
-                    report.rename(dest_path)
-                    print(f"  ✓ Archived: {report.name}")
-                    archived_count += 1
-            except PermissionError:
-                print(f"  ⚠ Skipped (file in use): {report.name}")
-                skipped_count += 1
-            except Exception as e:
-                print(f"  ⚠ Error archiving {report.name}: {e}")
-                skipped_count += 1
 
-        if archived_count > 0:
-            print(f"✅ Archived {archived_count} report(s)")
-        if skipped_count > 0:
-            print(
-                f"⚠️  Skipped {skipped_count} report(s) (close Word documents and try again)"
-            )
+def get_current_version():
+    """Get current version from version_info.txt"""
+    try:
+        content = Path("version_info.txt").read_text(encoding="utf-8")
+        match = re.search(r"Version:\s*v?(\d+\.\d+\.\d+)", content)
+        return match.group(1) if match else "0.0.0"
+    except Exception:
+        return "0.0.0"
 
-        return archived_count
 
-    def get_git_status(self):
-        """Get current git status"""
-        status = self.run_command("git status --porcelain")
-        return status
+def analyze_commits(last_tag):
+    """Analyze commits since last tag to determine version bump and categorize changes"""
+    if last_tag == "0.0.0":
+        commits = run('git log --pretty=format:"%s"', check=False).split("\n")
+    else:
+        commits = run(
+            f'git log v{last_tag}..HEAD --pretty=format:"%s"', check=False
+        ).split("\n")
 
-    def collect_changelog(self):
-        """Collect changelog information automatically from git commits"""
-        print("\n📝 Changelog")
-        print("=" * 60)
+    commits = [c for c in commits if c.strip()]
+    if not commits:
+        return "patch", [], [], []
 
-        # Try to get recent commit messages
-        if self.previous_version:
-            git_log = self.run_command(
-                f"git log {self.previous_version}..HEAD --oneline --no-decorate",
-                check=False,
-            )
-        else:
-            git_log = self.run_command(
-                "git log --oneline --no-decorate -5", check=False
-            )
+    has_breaking = any("!" in c or "BREAKING" in c.upper() for c in commits)
+    has_feat = any(c.lower().startswith("feat") for c in commits)
 
-        changes = []
-        if git_log:
-            # Parse commit messages
-            for line in git_log.split("\n"):
-                if line.strip():
-                    # Remove commit hash and take message
-                    msg = " ".join(line.split()[1:])
-                    if msg and not msg.startswith("Merge"):
-                        changes.append(msg)
+    bump_type = "major" if has_breaking else ("minor" if has_feat else "patch")
 
-        if not changes:
-            changes = ["Updates and improvements"]
+    features = [c for c in commits if c.lower().startswith("feat")]
+    fixes = [c for c in commits if c.lower().startswith("fix")]
+    other = [
+        c
+        for c in commits
+        if not any(
+            c.lower().startswith(x) for x in ["feat", "fix", "chore", "docs", "style"]
+        )
+    ]
 
-        print("Auto-detected changes:")
-        for change in changes:
-            print(f"  • {change}")
+    return bump_type, features, fixes, other
 
-        self.changelog = changes
-        return changes
 
-    def generate_release_notes(self):
-        """Generate release notes"""
-        notes = f"# Release {self.version}\n\n"
-        notes += f"**Release Date**: {datetime.now().strftime('%Y-%m-%d')}\n\n"
+def bump_version(current, bump_type):
+    """Increment version number based on bump type"""
+    major, minor, patch = map(int, current.split("."))
+    if bump_type == "major":
+        return f"{major + 1}.0.0"
+    elif bump_type == "minor":
+        return f"{major}.{minor + 1}.0"
+    else:
+        return f"{major}.{minor}.{patch + 1}"
 
-        if self.previous_version:
-            notes += f"**Previous Version**: {self.previous_version}\n\n"
 
-        notes += "## Changes\n\n"
-        for change in self.changelog:
-            notes += f"- {change}\n"
-
-        notes += "\n## Features\n\n"
-        notes += "- Auto-detection of product and versions from BOM filenames\n"
-        notes += "- BOM comparison (added/removed/modified components)\n"
-        notes += "- PDF analysis for schematics and assembly drawings\n"
-        notes += "- Interactive GUI questionnaire for change documentation\n"
-        notes += "- Professional Word document reports with company branding\n"
-
-        return notes
-
-    def commit_changes(self):
-        """Commit all changes"""
-        print("\n💾 Committing Changes")
-        print("=" * 60)
-
-        status = self.get_git_status()
-        if not status:
-            print("⚠️  No changes to commit")
-            return False
-
-        print("Changes to commit:")
-        print(status)
-
-        # Update version files before commit
-        print("\n🔄 Updating version files...")
-        update_script = self.workspace / "scripts" / "update_version_files.py"
-        if update_script.exists():
-            result = self.run_command(f"python {update_script}", check=False)
-            if result is not None:
-                print("✅ Version files updated")
-            else:
-                print("⚠️  Version file update failed (continuing anyway)")
-        else:
-            print("⚠️  update_version_files.py not found (skipping)")
-
-        # Add all changes
-        self.run_command("git add .")
-
-        # Get commit message
-        print("\nCommit message:")
-        # Auto-generate commit message from changelog
-        commit_msg = f"{self.version} - " + ", ".join(self.changelog[:3])
-
-        # Commit
-        result = self.run_command(f'git commit -m "{commit_msg}"')
-        if result is not None:
-            print(f"✅ Changes committed: {commit_msg}")
-            return True
-
+def update_file(file_path, old_ver, new_ver, dry_run=False):
+    """Update version in a specific file"""
+    if not Path(file_path).exists():
         return False
 
-    def create_tag(self):
-        """Create annotated git tag"""
-        print("\n🏷️  Creating Tag")
-        print("=" * 60)
+    content = Path(file_path).read_text(encoding="utf-8")
+    original = content
 
-        tag_message = f"Release {self.version}\n\n" + "\n".join(
-            f"- {c}" for c in self.changelog
+    if file_path.endswith("version_info.txt"):
+        content = re.sub(
+            r"Version:\s*v?" + re.escape(old_ver),
+            f"Version: v{new_ver}",
+            content,
+        )
+    elif file_path.endswith("installer.iss"):
+        content = re.sub(
+            r"AppVersion=" + re.escape(old_ver), f"AppVersion={new_ver}", content
+        )
+        content = re.sub(
+            r"AppVerName=COC Report Generator v" + re.escape(old_ver),
+            f"AppVerName=COC Report Generator v{new_ver}",
+            content,
+        )
+        content = re.sub(
+            r"OutputBaseFilename=COC_Report_v" + re.escape(old_ver) + r"_Setup",
+            f"OutputBaseFilename=COC_Report_v{new_ver}_Setup",
+            content,
+        )
+    elif file_path.endswith("release_metadata.json"):
+        content = re.sub(
+            r'"version":\s*"' + re.escape(old_ver) + r'"',
+            f'"version": "{new_ver}"',
+            content,
         )
 
-        result = self.run_command(f'git tag -a {self.version} -m "{tag_message}"')
-        if result is not None:
-            print(f"✅ Tag created: {self.version}")
-            return True
-
-        return False
-
-    def push_to_github(self):
-        """Push commits and tags to GitHub"""
-        print("\n🚀 Pushing to GitHub")
-        print("=" * 60)
-
-        # Check if remote exists
-        if not self.get_remote_url():
-            print("❌ No remote configured")
-            return False
-
-        # Push commits
-        print("Pushing commits...")
-        result = self.run_command("git push origin master", check=False)
-        if result is None:
-            # Try main branch
-            print("Trying main branch...")
-            result = self.run_command("git push origin main", check=False)
-            if result is None:
-                print(
-                    "⚠️  Push failed. You may need to authenticate or set upstream branch."
-                )
-                print("   Try: git push -u origin master")
-                return False
-
-        print("✅ Commits pushed")
-
-        # Push tags
-        print("Pushing tags...")
-        result = self.run_command("git push --tags", check=False)
-        if result is not None:
-            print("✅ Tags pushed")
-        else:
-            print("⚠️  Tag push failed")
-
+    if content != original and not dry_run:
+        Path(file_path).write_text(content, encoding="utf-8")
         return True
+    return content != original
 
-    def create_github_release(self):
-        """Create GitHub release using gh CLI"""
-        print("\n🎉 Creating GitHub Release")
-        print("=" * 60)
 
-        # Check if gh CLI is installed
-        gh_check = self.run_command("gh --version", check=False)
-        if gh_check is None:
-            print("⚠️  GitHub CLI (gh) not installed")
-            print("   Install from: https://cli.github.com/")
-            print("   Release tag created, but GitHub release not created")
-            return False
+def generate_notes(version, features, fixes, other):
+    """Generate comprehensive release notes"""
+    notes = f"""## Release v{version}
 
-        print(f"GitHub CLI version: {gh_check.split()[2]}")
+**Released:** {datetime.now().strftime('%B %d, %Y')}
 
-        # Generate release notes
-        notes = self.generate_release_notes()
+"""
+    if features:
+        notes += "### [FEATURE] New Features\n\n"
+        for f in features[:15]:
+            clean_msg = re.sub(r"^feat(\([^)]+\))?:\s*", "", f)
+            notes += f"- {clean_msg}\n"
+        notes += "\n"
 
-        # Save notes to temp file
-        notes_file = self.workspace / "release_notes.md"
-        notes_file.write_text(notes, encoding="utf-8")
+    if fixes:
+        notes += "### [FIX] Bug Fixes\n\n"
+        for f in fixes[:15]:
+            clean_msg = re.sub(r"^fix(\([^)]+\))?:\s*", "", f)
+            notes += f"- {clean_msg}\n"
+        notes += "\n"
 
-        # Create release
-        cmd = f'gh release create {self.version} --title "Release {self.version}" --notes-file release_notes.md'
-        result = self.run_command(cmd, check=False)
+    if other:
+        notes += "### [OTHER] Other Changes\n\n"
+        for o in other[:10]:
+            notes += f"- {o}\n"
+        notes += "\n"
 
-        # Clean up
-        notes_file.unlink()
+    notes += f"""---
 
-        if result is not None:
-            print(f"✅ GitHub release created: {self.version}")
-            return True
-        else:
-            print("⚠️  GitHub release creation failed")
-            print("   You may need to authenticate: gh auth login")
-            return False
+### [DOWNLOAD] Installation
 
-    def save_release_metadata(self):
-        """Save release metadata to JSON file"""
-        metadata_file = self.workspace / "release_metadata.json"
+**Installer:** COC_Report_v{version}_Setup.exe (Recommended)
+**Portable:** COC_Report.exe (Standalone)
 
-        metadata = {
-            "version": self.version,
-            "previous_version": self.previous_version,
-            "release_date": datetime.now().isoformat(),
-            "changelog": self.changelog,
-        }
+### [FEATURES] Core Capabilities
 
-        metadata_file.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        print(f"✅ Release metadata saved to {metadata_file.name}")
+- Certificate of Conformance (COC) report generation
+- BOM comparison (added/removed/modified components)
+- PDF analysis for schematics and assembly drawings
+- Interactive GUI questionnaire for change documentation
+- Professional Word document reports with company branding
+- Debug mode with detailed logging
+- File configuration system with persistent storage
 
-    def run_release_process(self, auto_mode=False, bump_type=None):
-        """Execute complete release process"""
-        print("\n" + "=" * 60)
-        print("🚀 GITHUB RELEASE MANAGER")
-        print("=" * 60)
+### [SYSTEM] Requirements
 
-        if auto_mode:
-            print("🤖 AUTO MODE: Fully automated release")
-        if bump_type:
-            print(f"🔼 Version bump: {bump_type}")
+- Windows 10/11 (64-bit)
+- Microsoft Word
+- Python 3.12+ (for development)
 
-        # Step 1: Check git repo
-        self.check_git_repo()
+### [START] Quick Start
 
-        # Step 2: Setup remote if needed
-        if not self.setup_remote(auto_mode):
-            print("❌ Release cancelled")
-            return
+1. Download and run installer
+2. Launch COC Report Generator
+3. Select your BOM and drawing files
+4. Complete the questionnaire
+5. Generate professional COC report
 
-        # Step 3: Archive old reports
-        self.archive_old_reports()
-
-        # Step 4: Get version information
-        self.previous_version = self.get_latest_tag()
-        self.version = self.get_new_version(auto_mode, bump_type)
-
-        print(f"\n🎯 Target version: {self.version}")
-
-        # Step 5: Collect changelog
-        self.collect_changelog()
-
-        # Step 6: Show summary and confirm
-        print("\n" + "=" * 60)
-        print("📋 RELEASE SUMMARY")
-        print("=" * 60)
-        print(f"Version: {self.version}")
-        if self.previous_version:
-            print(f"Previous: {self.previous_version}")
-        print("\nChanges:")
-        for change in self.changelog:
-            print(f"  • {change}")
-
-        if not auto_mode:
-            confirm = input("\n✓ Proceed with release? (y/n): ").strip().lower()
-            if confirm != "y":
-                print("❌ Release cancelled")
-                return
-        else:
-            print("\n✓ Auto-proceeding with release...")
-
-        # Step 7: Commit changes
-        committed = self.commit_changes()
-
-        # Step 8: Create tag
-        if committed or self.get_git_status():
-            self.create_tag()
-
-        # Step 9: Save metadata
-        self.save_release_metadata()
-
-        # Step 10: Push to GitHub
-        pushed = self.push_to_github()
-
-        # Step 11: Create GitHub release (if gh CLI available)
-        if pushed:
-            self.create_github_release()
-
-        print("\n" + "=" * 60)
-        print("✅ RELEASE PROCESS COMPLETE")
-        print("=" * 60)
-        print(f"Version {self.version} released successfully!")
-
-        remote_url = self.get_remote_url()
-        if remote_url:
-            repo_path = remote_url.replace(".git", "").replace(
-                "https://github.com/", ""
-            )
-            print(
-                f"\n🔗 View release: https://github.com/{repo_path}/releases/tag/{self.version}"
-            )
+---
+*Built {datetime.now().strftime('%B %d, %Y')}*
+"""
+    return notes
 
 
 def main():
-    import argparse
+    start_time = time.time()
 
-    parser = argparse.ArgumentParser(description="GitHub Release Manager")
+    parser = argparse.ArgumentParser(description="COC Report Generator Release Script")
+    parser.add_argument("--patch", action="store_true", help="Patch increment")
+    parser.add_argument("--minor", action="store_true", help="Minor increment")
+    parser.add_argument("--major", action="store_true", help="Major increment")
+    parser.add_argument("--version", type=str, help="Specific version")
+    parser.add_argument("--dry-run", action="store_true", help="Preview only")
+    parser.add_argument("--skip-build", action="store_true", help="Skip building")
+    parser.add_argument("--skip-push", action="store_true", help="Skip pushing")
     parser.add_argument(
-        "--auto",
+        "--build-only",
         action="store_true",
-        help="Fully automated mode - no prompts, auto-increment version, auto-generate changelog",
+        help="Only build exe/installer (no version bump or git ops)",
     )
     parser.add_argument(
-        "--bump",
-        choices=["major", "minor", "patch"],
-        help="Specify version bump type (major, minor, or patch). Overrides auto-detection.",
+        "--push-only",
+        action="store_true",
+        help="Commit and push current changes only (no version bump or build)",
     )
     args = parser.parse_args()
 
-    workspace = Path(__file__).parent.parent
-    manager = GitHubReleaseManager(workspace)
+    current = get_current_version()
+    new = current
 
+    print("\n" + "=" * 80)
+    print(" COC REPORT GENERATOR - RELEASE AUTOMATION ".center(80))
+    print("=" * 80 + "\n")
+
+    if args.dry_run:
+        print("[DRY RUN] Preview mode - no changes will be made\n")
+
+    if args.build_only:
+        print("[BUILD ONLY] Skipping version bump and git operations\n")
+
+    if args.push_only:
+        print("[PUSH ONLY] Committing and pushing changes only\n")
+
+    # Step 1: Get latest GitHub tag
+    if not args.build_only and not args.push_only:
+        print("[1/8] Fetching latest version from GitHub...")
+        spinner = Spinner("Checking GitHub releases...")
+        spinner.start()
+        github_tag = get_latest_github_tag()
+        spinner.stop(f"[OK] Latest GitHub: v{github_tag}, Current: v{current}\n")
+
+        # Step 2: Determine new version
+        print("[2/8] Determining new version...")
+        if args.version:
+            new = args.version
+            print(f"       [OK] User-specified: v{new}\n")
+        else:
+            base_version = max(
+                [github_tag, current], key=lambda v: list(map(int, v.split(".")))
+            )
+
+            if args.major:
+                bump_type = "major"
+            elif args.minor:
+                bump_type = "minor"
+            elif args.patch:
+                bump_type = "patch"
+            else:
+                bump_type, _, _, _ = analyze_commits(base_version)
+
+            new = bump_version(base_version, bump_type)
+            print(f"       [OK] Auto-detected {bump_type}: v{new}\n")
+
+    # Step 3: Analyze commits
+    features, fixes, other = [], [], []
+    if not args.build_only and not args.push_only:
+        print("[3/8] Analyzing commits...")
+        spinner = Spinner("Reading git history...")
+        spinner.start()
+        _, features, fixes, other = analyze_commits(current)
+        total = len(features) + len(fixes) + len(other)
+        spinner.stop(
+            f"[OK] {total} commits ({len(features)} features, {len(fixes)} fixes)\n"
+        )
+
+    # Step 4: Update files
+    if not args.build_only and not args.push_only:
+        print("[4/8] Updating version files...")
+        files = [
+            "version_info.txt",
+            "installer.iss",
+            "release_metadata.json",
+        ]
+        for f in files:
+            if update_file(f, current, new, args.dry_run):
+                print(f"       [OK] {f}")
+        print()
+
+    # Step 5: Commit
+    if args.push_only or (not args.build_only):
+        step_num = "[1/2]" if args.push_only else "[5/8]"
+        print(f"{step_num} Creating git commit...")
+        if not args.dry_run:
+            spinner = Spinner("Staging files...")
+            spinner.start()
+            run("git add -A")
+            commit_msg = (
+                f"chore: Release v{new}"
+                if not args.push_only
+                else "chore: Update changes"
+            )
+            run(f'git commit -m "{commit_msg}"')
+            spinner.stop(f"[OK] Committed: {commit_msg}\n")
+        else:
+            print("       [SKIP] Dry run\n")
+
+    # Step 6: Tag
+    if not args.skip_push and not args.build_only and not args.push_only:
+        print("[6/8] Creating git tag...")
+        if not args.dry_run:
+            run(f'git tag -a v{new} -m "Release v{new}"')
+            print(f"       [OK] Tagged v{new}\n")
+        else:
+            print("       [SKIP] Dry run\n")
+
+    # Step 7: Push
+    if not args.skip_push and (args.push_only or not args.build_only):
+        step_num = "[2/2]" if args.push_only else "[7/8]"
+        print(f"{step_num} Pushing to GitHub...")
+        if not args.dry_run:
+            spinner = Spinner("Pushing branch and tags...")
+            spinner.start()
+            run("git push origin master", check=False)
+            if not args.push_only:
+                run("git push --tags", check=False)
+            spinner.stop("[OK] Pushed\n")
+        else:
+            print("       [SKIP] Dry run\n")
+    elif args.skip_push:
+        print("[7/8] [SKIP] Push disabled\n")
+
+    # Step 8: Build
+    if not args.skip_build and not args.push_only:
+        step_num = "[1/2]" if args.build_only else "[8/8]"
+        print(f"{step_num} Building executable and installer...")
+        if not args.dry_run:
+            python_cmd = get_python_command()
+
+            # Build executable
+            spinner = Spinner("Building executable...")
+            spinner.start()
+            run(f"{python_cmd} build_exe.py")
+            spinner.stop("[OK] Executable built\n")
+
+            # Build installer
+            spinner = Spinner("Building installer...")
+            spinner.start()
+            run(f"{python_cmd} build_installer.py")
+            spinner.stop("[OK] Installer built\n")
+
+            # Verify files exist
+            exe_path = Path("dist/COC_Report.exe")
+            installer_path = Path(f"installer/COC_Report_v{new}_Setup.exe")
+
+            if exe_path.exists():
+                size_mb = exe_path.stat().st_size / (1024 * 1024)
+                print(f"       Executable: COC_Report.exe ({size_mb:.2f} MB)")
+
+            if installer_path.exists():
+                size_mb = installer_path.stat().st_size / (1024 * 1024)
+                print(
+                    f"       Installer: COC_Report_v{new}_Setup.exe ({size_mb:.2f} MB)"
+                )
+            print()
+        else:
+            print("       [SKIP] Dry run\n")
+    elif args.skip_build:
+        print("[8/8] [SKIP] Build disabled\n")
+    elif args.push_only:
+        print("       [SKIP] Push-only mode\n")
+
+    # Step 9: GitHub Release
+    if not args.skip_push and not args.build_only and not args.push_only:
+        print("[BONUS] Creating GitHub release...")
+        if not args.dry_run:
+            notes = generate_notes(new, features, fixes, other)
+            Path("release_notes.txt").write_text(notes, encoding="utf-8")
+
+            assets = []
+            installer = Path(f"installer/COC_Report_v{new}_Setup.exe")
+            exe = Path("dist/COC_Report.exe")
+
+            if installer.exists():
+                assets.append(f'"{installer}"')
+            if exe.exists():
+                assets.append(f'"{exe}"')
+
+            try:
+                spinner = Spinner("Uploading to GitHub...")
+                spinner.start()
+                if assets:
+                    run(
+                        f'gh release create v{new} {" ".join(assets)} --title "COC Report v{new}" --notes-file release_notes.txt'
+                    )
+                else:
+                    run(
+                        f'gh release create v{new} --title "COC Report v{new}" --notes-file release_notes.txt'
+                    )
+                spinner.stop("[OK] Released\n")
+                Path("release_notes.txt").unlink()
+            except Exception as e:
+                spinner.stop(f"[ERROR] GitHub CLI failed: {e}\n")
+                print("        Install gh cli: https://cli.github.com/\n")
+        else:
+            print("       [SKIP] Dry run\n")
+
+    # Summary
+    print("=" * 80)
+    print(" RELEASE COMPLETE ".center(80))
+    print("=" * 80)
+    print(f"\nVersion: v{current} -> v{new}")
+    if not args.dry_run and not args.build_only and not args.push_only:
+        print(f"View: https://github.com/mvdeventer/COCforPCBs/releases/tag/v{new}\n")
+    elif args.dry_run:
+        print("\n[DRY RUN] No changes were made. Run without --dry-run to execute.\n")
+
+    # Print total build time
+    elapsed_time = time.time() - start_time
+    minutes = int(elapsed_time // 60)
+    seconds = int(elapsed_time % 60)
+    if minutes > 0:
+        print(f"Total time: {minutes} min {seconds} sec\n")
+    else:
+        print(f"Total time: {seconds} sec\n")
+
+
+if __name__ == "__main__":
     try:
-        manager.run_release_process(auto_mode=args.auto, bump_type=args.bump)
+        main()
     except KeyboardInterrupt:
-        print("\n\n❌ Release cancelled by user")
+        print("\n\n[CANCELLED] Release aborted\n")
         sys.exit(1)
     except Exception as e:
-        print(f"\n\n❌ Error: {e}")
+        print(f"\n[ERROR] {e}\n")
         import traceback
 
         traceback.print_exc()
         sys.exit(1)
-
-
-if __name__ == "__main__":
-    main()

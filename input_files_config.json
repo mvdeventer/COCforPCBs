@@ -1,9 +1,9 @@
 {
-  "bom_old": "",
-  "bom_new": "",
-  "schematic_old": "",
-  "schematic_new": "",
-  "assembly_old": "",
-  "assembly_new": "",
-  "last_updated": ""
+  "bom_old": "c:\\Users\\martin.vdeventer\\OneDrive - LHA00001 LHA Systems (PTY) LTD\\PSU2 V10 COC\\input_files\\BT3413A-8 (Bill of Materials).xlsx",
+  "bom_new": "c:\\Users\\martin.vdeventer\\OneDrive - LHA00001 LHA Systems (PTY) LTD\\PSU2 V10 COC\\input_files\\BT3413A-10 (Bill of Materials).xlsx",
+  "schematic_old": "c:\\Users\\martin.vdeventer\\OneDrive - LHA00001 LHA Systems (PTY) LTD\\PSU2 V10 COC\\input_files\\BT3415B-8(Schematic Circuit Diagram).PDF",
+  "schematic_new": "c:\\Users\\martin.vdeventer\\OneDrive - LHA00001 LHA Systems (PTY) LTD\\PSU2 V10 COC\\input_files\\BT3415B-10 (Schematic Circuit Diagram).PDF",
+  "assembly_old": "c:\\Users\\martin.vdeventer\\OneDrive - LHA00001 LHA Systems (PTY) LTD\\PSU2 V10 COC\\input_files\\BT3411B-8(Assembly Drawing).PDF",
+  "assembly_new": "c:\\Users\\martin.vdeventer\\OneDrive - LHA00001 LHA Systems (PTY) LTD\\PSU2 V10 COC\\input_files\\BT3411B-10 (Assembly Drawing).PDF",
+  "last_updated": "2025-11-20T00:00:00"
 }
