@@ -337,7 +337,7 @@ def main():
         print("[PUSH ONLY] Committing and pushing changes only\n")
 
     # Step 1: Get latest GitHub tag
-    if not args.build_only and not args.push_only:
+    if not args.build_only and not args.push_only and not args.exe_only and not args.installer_only:
         print("[1/8] Fetching latest version from GitHub...")
         spinner = Spinner("Checking GitHub releases...")
         spinner.start()
