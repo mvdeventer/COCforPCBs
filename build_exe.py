@@ -137,11 +137,31 @@ def build_exe():
             return False
 
     # Run PyInstaller
+    print("[BUILD] Cleaning previous build artifacts...")
+    import shutil
+
+    build_dir = Path(__file__).parent / "build"
+    dist_dir = Path(__file__).parent / "dist"
+
+    # Clean build directory with error handling
+    if build_dir.exists():
+        try:
+            shutil.rmtree(build_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"[WARNING] Could not fully clean build directory: {e}")
+
+    # Clean dist directory
+    if dist_dir.exists():
+        try:
+            shutil.rmtree(dist_dir, ignore_errors=True)
+        except Exception as e:
+            print(f"[WARNING] Could not fully clean dist directory: {e}")
+
     print("[BUILD] Building EXE...")
     print()
 
     result = subprocess.run(
-        [sys.executable, "-m", "PyInstaller", str(spec_file), "--clean", "--noconfirm"],
+        [sys.executable, "-m", "PyInstaller", str(spec_file), "--noconfirm"],
         cwd=Path(__file__).parent,
         check=False,
     )

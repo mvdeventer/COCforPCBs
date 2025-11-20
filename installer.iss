@@ -8,7 +8,7 @@
 
 ; Get version from file or use default
 #ifndef AppVersion
-  #define AppVersion "1.0.3"
+  #define AppVersion "1.0.4"
 #endif
 
 [Setup]
@@ -22,8 +22,8 @@ AppUpdatesURL={#AppURL}
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 AllowNoIcons=yes
-LicenseFile=LICENSE
-InfoBeforeFile=README.md
+; LicenseFile=LICENSE
+; InfoBeforeFile=README.md
 OutputDir=dist\installer
 OutputBaseFilename=COC_Report_Generator_Setup_{#AppVersion}
 SetupIconFile=company_logo.ico

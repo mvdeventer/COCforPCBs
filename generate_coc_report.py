@@ -2202,28 +2202,21 @@ def main():
     logger.debug(f"main: workspace={workspace}")
     logger.debug(f"main: DEBUG_MODE={DEBUG_MODE}")
 
-    # Check if user wants to configure files manually
-    use_file_selector = "--configure" in sys.argv or "-c" in sys.argv
+    # Always show file selector at startup
+    print("\n" + "=" * 60)
+    print("FILE SELECTION")
+    print("=" * 60)
+    result = show_file_selector_dialog(workspace)
 
-    # Load existing config
-    file_config = load_file_config(workspace)
-
-    # Show file selector if requested or no config exists
-    if use_file_selector or not file_config:
-        print("\n" + "=" * 60)
-        print("FILE SELECTION")
-        print("=" * 60)
-        result = show_file_selector_dialog(workspace)
-
-        if result == "auto":
-            print("User chose auto-detection")
-            file_config = None
-        elif result:
-            file_config = result
-            print("✓ Files configured successfully")
-        else:
-            print("❌ File selection cancelled")
-            return
+    if result == "auto":
+        print("User chose auto-detection")
+        file_config = None
+    elif result:
+        file_config = result
+        print("✓ Files configured successfully")
+    else:
+        print("❌ File selection cancelled")
+        return
 
     # STEP 1: Extract version & variant from BOM files
     print("\n" + "=" * 60)
