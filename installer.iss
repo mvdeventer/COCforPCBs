@@ -8,7 +8,7 @@
 
 ; Get version from file or use default
 #ifndef AppVersion
-  #define AppVersion "1.0.4"
+  #define AppVersion "1.0.5"
 #endif
 
 [Setup]

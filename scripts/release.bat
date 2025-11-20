@@ -92,6 +92,8 @@ echo   --dry-run       Preview without changes
 echo   --skip-build    Skip building executable/installer
 echo   --skip-push     Skip pushing to GitHub
 echo   --build-only    Build exe/installer only (no version bump or git ops)
+echo   --exe-only      Build only executable (no installer, no git ops)
+echo   --installer-only Build only installer (assumes exe exists, no git ops)
 echo   --push-only     Commit and push current changes only (no version bump or build)
 echo.
 echo Examples:
@@ -101,6 +103,8 @@ echo   release.bat --patch         # Quick patch release
 echo   release.bat --skip-build    # Version bump and git only
 echo   release.bat --version 1.1.0 # Set specific version
 echo   release.bat --build-only    # Just rebuild current version
+echo   release.bat --exe-only      # Build executable only
+echo   release.bat --installer-only # Build installer only
 echo   release.bat --push-only     # Commit and push changes (no build/version bump)
 echo.
 echo Note: Script fetches latest version from GitHub automatically

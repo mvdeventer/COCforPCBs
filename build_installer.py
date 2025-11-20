@@ -155,9 +155,9 @@ def build_installer():
     print("[BUILD] Building installer...")
     print()
 
-    # Run Inno Setup compiler
+    # Run Inno Setup compiler with verbose output
     result = subprocess.run(
-        [str(iscc), str(iss_file)], cwd=Path(__file__).parent, check=False
+        [str(iscc), "/V9", str(iss_file)], cwd=Path(__file__).parent, check=False
     )
 
     if result.returncode == 0:

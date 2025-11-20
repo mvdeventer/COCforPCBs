@@ -13,7 +13,9 @@ Usage:
     python scripts/release.py --version 1.1.0  # Specific version
     python scripts/release.py --dry-run    # Preview only
     python scripts/release.py --push-only  # Commit and push only (no build/version bump)
-    python scripts/release.py --build-only # Build executable only (no git operations)
+    python scripts/release.py --build-only # Build executable and installer (no git operations)
+    python scripts/release.py --exe-only   # Build only executable
+    python scripts/release.py --installer-only # Build only installer
     python scripts/release.py --skip-push  # Skip git push operations
     python scripts/release.py --skip-build # Skip building executable/installer
 
@@ -293,6 +295,16 @@ def main():
         help="Only build exe/installer (no version bump or git ops)",
     )
     parser.add_argument(
+        "--exe-only",
+        action="store_true",
+        help="Build only executable (no installer, no git ops)",
+    )
+    parser.add_argument(
+        "--installer-only",
+        action="store_true",
+        help="Build only installer (assumes exe exists, no git ops)",
+    )
+    parser.add_argument(
         "--push-only",
         action="store_true",
         help="Commit and push current changes only (no version bump or build)",
@@ -309,8 +321,17 @@ def main():
     if args.dry_run:
         print("[DRY RUN] Preview mode - no changes will be made\n")
 
-    if args.build_only:
-        print("[BUILD ONLY] Skipping version bump and git operations\n")
+    if args.build_only or args.exe_only or args.installer_only:
+        if args.exe_only:
+            print(
+                "[EXE ONLY] Building executable only (skipping version bump, git ops, and installer)\n"
+            )
+        elif args.installer_only:
+            print(
+                "[INSTALLER ONLY] Building installer only (skipping version bump, git ops, and exe)\n"
+            )
+        else:
+            print("[BUILD ONLY] Skipping version bump and git operations\n")
 
     if args.push_only:
         print("[PUSH ONLY] Committing and pushing changes only\n")
@@ -416,21 +437,34 @@ def main():
     # Step 8: Build
     if not args.skip_build and not args.push_only:
         step_num = "[1/2]" if args.build_only else "[8/8]"
-        print(f"{step_num} Building executable and installer...")
+
+        # Determine what to build
+        build_exe = not args.installer_only
+        build_installer = not args.exe_only
+
+        if args.exe_only:
+            print(f"{step_num} Building executable only...")
+        elif args.installer_only:
+            print(f"{step_num} Building installer only...")
+        else:
+            print(f"{step_num} Building executable and installer...")
+
         if not args.dry_run:
             python_cmd = get_python_command()
 
             # Build executable
-            spinner = Spinner("Building executable...")
-            spinner.start()
-            run(f"{python_cmd} build_exe.py")
-            spinner.stop("[OK] Executable built\n")
+            if build_exe:
+                spinner = Spinner("Building executable...")
+                spinner.start()
+                run(f"{python_cmd} build_exe.py")
+                spinner.stop("[OK] Executable built\n")
 
             # Build installer
-            spinner = Spinner("Building installer...")
-            spinner.start()
-            run(f"{python_cmd} build_installer.py")
-            spinner.stop("[OK] Installer built\n")
+            if build_installer:
+                spinner = Spinner("Building installer...")
+                spinner.start()
+                run(f"{python_cmd} build_installer.py")
+                spinner.stop("[OK] Installer built\n")
 
             # Verify files exist
             exe_path = Path("dist/COC_Report.exe")

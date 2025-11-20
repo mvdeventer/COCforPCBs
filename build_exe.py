@@ -160,8 +160,16 @@ def build_exe():
     print("[BUILD] Building EXE...")
     print()
 
+    # Run PyInstaller with verbose output
     result = subprocess.run(
-        [sys.executable, "-m", "PyInstaller", str(spec_file), "--noconfirm"],
+        [
+            sys.executable,
+            "-m",
+            "PyInstaller",
+            str(spec_file),
+            "--noconfirm",
+            "--log-level=DEBUG",
+        ],
         cwd=Path(__file__).parent,
         check=False,
     )
